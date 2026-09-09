@@ -14,7 +14,7 @@ full qmd file, as well as the rendered pdf without codes.
 -**Model Comparison** - Compared all candidate models by multiples metrics, finally selecting the forward-selection WLS model
 
 ## Files
- `final_project.qmd` — full Quarto source (analysis, code, and writeup)
+- `final_project.qmd` — full Quarto source (analysis, code, and writeup)
 - `final_project.pdf` — rendered report
 - `APPENC07.csv` — dataset (Kutner et al., Applied Linear Statistical
   Models, Appendix C.7)
