@@ -1,0 +1,1219 @@
+---
+title: "Final Project"
+subtitle: "Kutner C.7: Real Estate Sales"
+author: "Simon Turner"
+format: html
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r}
+# Step 1: Load and understand the data/load necessary libraries
+library(dplyr)
+library(tibble)
+library(ggplot2)
+library(GGally)
+library(corrplot)
+library(car)
+library(leaps)
+library(patchwork)
+data_raw = read.csv("APPENC07.csv")
+cat("Dimensions of dataset: ", dim(data_raw))
+```
+
+| Variable | Description/Type | Variable | Description/Type |
+|------------------|------------------|------------------|------------------|
+| ID | Data identification number; continuous predictor | Pool | Does the residence have a swimming pool; categorical predictor (0, 1 binary) |
+| Sqft | Finished square footage of the property; continuous predictor | Year | Year the property was originally constructed; continuous predictor |
+| Bed | Total number of bedrooms in the residence; continuous predictor | Quality | Index for quality of construction; categorical predictor (1=high quality, 2=medium quality, 3=low quality) |
+| Bath | Total number of bathrooms in the residence; continuous predictor | Style | Qualitative indicator of architectural style; categorical predictor (1,2,3,4,5,6,7,9,10,11) |
+| AC | Does the residence have AC; categorical predictor (0, 1 binary) | Lot | Size of the lot the residence is on; continuous predictor |
+| Garage | Number of cars the garage will hold; continuous predictor | Highway | Is the residence adjacent to a highway; categorical predictor (0, 1 binary) |
+| **Price** | **Sales price of the residence in dollars; continuous response** |  |  |
+
+A few things to note about the data. As we can see there are 7 continuous predictors and 5 categorical predictors. The response variable is the sales price of the specific residence at the ID number, which is a continuous value, so I am choosing to use a linear model considering the mix of predictors and the fact that the response is continuous. In all of the cases of a binary categorical predictor 0 represents "no" and 1 represents "yes". For the style parameter, there are 11 different categories. I was unable to find any sort of information on what the 11 styles represent so they will have to remain as arbitrary categories. The main design choice that I made is to represent the year, bath, bed, and garage predictors as continuous variables instead of categorical. Requiring dummy variables for each of these would create too many predictors. Also, for each of these values there is a genuine meaning for an increase, so the coefficients will have a good interpretation. Finally, ID does not actually represent anything so it will be excluded from all diagnostics and modeling. This leaves us with 6 continuous predictors and 5 categorical predictors, giving us 11 predictors to select from.
+
+Based on these predictors, the proposed research question is: What combination of structural, quality, and location characteristics best predicts a residence's sale price, and how much of the variation can these features explain?
+
+```{r}
+# Remove ID from data
+data_raw$ID = NULL
+
+# Step 2: Explore the response
+p_price <- ggplot(data_raw, aes(x = Price)) +
+  geom_histogram(bins = 30) +
+  labs(x = "Sales Price", y = "Count") +
+  theme_minimal(base_size = 16)
+
+# Put price on log scale
+data_raw$log_price = log(data_raw$Price)
+p_log <- ggplot(data_raw, aes(x = log_price)) +
+  geom_histogram(bins = 30) +
+  labs(x = "log(Sales Price)", y = "Count") +
+  theme_minimal(base_size = 16)
+
+p_price + p_log
+```
+
+Since the response variable is sales price, I decided to plot the histogram along with the histogram of the log since price often grow exponentially and using log will smooth out some of the relationships. It is clear that the histogram of the price is very much right skewed which does make sense in the context of sales price of a residence. With the transform to log(price), the histogram is still right skewed, but it is much less severe than without the transformation. Since we don't need symmetry in the response distribution this is not enough to fully commit to log_price and we will consider this question more as we explore further.
+
+```{r}
+# Step 3: Explore relationships between variables
+correlation_data <- dplyr::select(
+  data_raw,
+  everything(),
+)
+predictor_cols = setdiff(names(correlation_data), c("Price", "log_price"))
+cor_predictors = cor(correlation_data[predictor_cols])
+hc = hclust(as.dist(1 - cor_predictors))
+ordered_predictors = predictor_cols[hc$order]
+final_order = c("Price", "log_price", ordered_predictors)
+cor_final = cor(correlation_data[final_order])
+
+corrplot(
+  cor_final,
+  method = "color",
+  type = "upper",
+  order = "original",
+  addCoef.col = "black",
+  number.cex = 0.55,
+  tl.col = "black",
+  tl.srt = 45,
+  tl.cex = 0.85,
+  diag = FALSE
+)
+```
+
+The first thing to analyze from the above plot is which predictors appear correlated with the response (which we have changed to log_price). Obviously price and log_price are highly correlated but we won't consider that because we will only use one of these response variables. Additionally, it is clear that log_price has a narrowly higher correlation with each predictor than price. This is still not enough evidence to commit to log_price, but for analysis of correlation we will use the values that correspond to the relationships of log_price, not price.
+
+The highest correlation is between log_price and square feet with cor = 0.84. Some other predictors with high correlation are quality (-0.79), number of bathrooms (0.74), and number of cars that can fit in the garage (0.60). The two predictors with the strongest correlation are number of bathrooms and square feet, with cor = 0.76. There are several other pairs that are highly correlated such as square feet and quality (-0.70), number of bathrooms and quality (-0.68), year and quality (-0.62), and finally style and square feet (0.62). All of these predictor pairs with correlation magnitude over 0.6 are things to focus on for best subset selection and potential interaction terms.
+
+```{r, warning=FALSE, message=FALSE}
+continuous_pairs <- data_raw |>
+  dplyr::select(-AC, -Pool, -Style, -Highway, -Quality) |>
+  relocate(log_price)
+
+GGally::ggpairs(
+  continuous_pairs,
+  lower = list(
+    continuous = "blank"
+  ),
+  upper = list(
+    continuous = GGally::wrap(
+      "smooth",
+      method = "loess",
+      color = "steelblue",
+      formula = y ~ x,
+      se = TRUE,
+      alpha = 0.20
+    )
+  ),
+  diag = list(
+    continuous = GGally::wrap(
+      "densityDiag",
+      alpha = 0.50
+    )
+  ),
+  progress = FALSE
+) +
+  theme_minimal(base_size = 8) +
+  theme(
+    axis.text = element_text(size = 4.5),
+    axis.title = element_text(size = 10),
+    strip.text = element_text(size = 6.5, face = "bold"),
+    panel.spacing = grid::unit(0.06, "lines")
+  )
+```
+
+The next step is to analyze the relationships between the continuous predictors and the response to see if nonlinear relationships exist. The curves for bed, bath, and garage (beyond!!) appear to contain some nonlinear relationship but for small and large values of each predictor the data is very sparse so it is hard to say if those nonlinear relationships are genuine or just due to sparsity. For lot, there is definitely a nonlinear curve at small values and then the curve flattens out into essentially a horizontal line. The strongest evidence for a nonlinear relationship is in the year predictor. There is a clear increasing curve for increasing year values, and that is where most of the data is. There is definitely potential to use a quadratic term for year to fit this data.
+
+```{r}
+discrete_data <- mutate(
+  data_raw,
+  AC = factor(
+    AC,
+    levels = c(0, 1),
+    labels = c("No", "Yes")
+  ),
+  Pool = factor(
+    Pool,
+    levels = c(0, 1),
+    labels = c("No", "Yes")
+  ),
+  Quality = factor(
+    Quality,
+    levels = c(1, 2, 3),
+    labels = c("High", "Medium", "Low")
+  ),
+  Style = factor(Style),
+  Highway = factor(
+    Highway,
+    levels = c(0, 1),
+    labels = c("No", "Yes")
+  )
+)
+
+p_AC <- ggplot(
+  discrete_data,
+  aes(x = AC, y = log_price)
+) +
+  geom_boxplot(
+    width = 0.55,
+    outlier.shape = NA
+  ) +
+  geom_point(
+    position = position_jitter(
+      width = 0.12,
+      height = 0,
+      seed = 413
+    ),
+    alpha = 0.35,
+    size = 0.9
+  ) +
+  labs(
+    x = "Has AC",
+    y = "log(price)"
+  ) +
+  theme_minimal(base_size = 15)
+
+p_Pool <- ggplot(
+  discrete_data,
+  aes(x = Pool, y = log_price)
+) +
+  geom_boxplot(
+    width = 0.65,
+    outlier.shape = NA
+  ) +
+  geom_point(
+    position = position_jitter(
+      width = 0.13,
+      height = 0,
+      seed = 413
+    ),
+    alpha = 0.30,
+    size = 0.75
+  ) +
+  labs(
+    x = "Has Pool",
+    y = "log(price)"
+  ) +
+  theme_minimal(base_size = 15)
+
+p_Quality <- ggplot(
+  discrete_data,
+  aes(x = Quality, y = log_price)
+) +
+  geom_boxplot(
+    width = 0.65,
+    outlier.shape = NA
+  ) +
+  geom_point(
+    position = position_jitter(
+      width = 0.13,
+      height = 0,
+      seed = 413
+    ),
+    alpha = 0.30,
+    size = 0.75
+  ) +
+  labs(
+    x = "Quality of Construction Index",
+    y = "log(price)"
+  ) +
+  theme_minimal(base_size = 15)
+
+p_Style <- ggplot(
+  discrete_data,
+  aes(x = Style, y = log_price)
+) +
+  geom_boxplot(
+    width = 0.65,
+    outlier.shape = NA
+  ) +
+  geom_point(
+    position = position_jitter(
+      width = 0.13,
+      height = 0,
+      seed = 413
+    ),
+    alpha = 0.30,
+    size = 0.75
+  ) +
+  labs(
+    x = "Style Indicator",
+    y = "log(price)"
+  ) +
+  theme_minimal(base_size = 15)
+
+p_Highway <- ggplot(
+  discrete_data,
+  aes(x = Highway, y = log_price)
+) +
+  geom_boxplot(
+    width = 0.65,
+    outlier.shape = NA
+  ) +
+  geom_point(
+    position = position_jitter(
+      width = 0.13,
+      height = 0,
+      seed = 413
+    ),
+    alpha = 0.30,
+    size = 0.75
+  ) +
+  labs(
+    x = "Adjacent to Highway",
+    y = "log(price)"
+  ) +
+  theme_minimal(base_size = 15)
+
+(p_AC + p_Pool + p_Quality + p_Style + p_Highway) +
+  plot_layout(widths = c(0.35, 0.65))
+```
+
+I chose to do log_price as the response for these plots even though I have not selected it as the response yet. It is currently the leading candidate and the relationships are the same regardless of whether I transformed the response or not.
+
+Now to do the same analysis for the categorical predictors. AC, pool, and style all show a pretty horizontal fit, there is not much difference from one group to another. In the style plot there is some variation for values 9, 10, and 11, but there is also little to no data there. There is a slightly increasing trend for both AC and pool but it is minimal. Highway similarly shows little to no variation from one group to the other. There is a strong linear relationship in the quality plot. Clearly log_price is negatively correlated with the construction quality, which makes sense given that 1 indicates high quality while 3 indicates low. Overall there doesn't appear to be any nonlinear relationship between any of the categorical predictors and log_price. At this point style is an extremely arbitrary parameter and the data is very sparse for all levels besides 1, 2, and 3. Because we can't interpret it anyways and it has weak predictive power overall based on the correlation heat map, I am choosing to omit it from this point on as it will only make the model more confusing without providing much benefit.
+
+```{r}
+# Remove style from data
+data_raw$Style = NULL
+
+# Split data into train and test sets (80/20)
+set.seed(42)
+test_id <- sample(
+  seq_len(nrow(data_raw)),
+  size = floor(0.20 * nrow(data_raw))
+)
+data_test_raw <- data_raw[test_id, ]
+data_train_raw <- data_raw[-test_id, ]
+
+# Standardize continuous variable sets separately
+continuous = c("Price", "log_price", "Sqft", "Bed", "Bath", "Garage", "Year", "Lot")
+train_means = sapply(data_train_raw[continuous], mean)
+train_sds = sapply(data_train_raw[continuous], sd)
+test_means = sapply(data_test_raw[continuous], mean)
+test_sds = sapply(data_test_raw[continuous], sd)
+# Function to standardize
+standardize = function(df, means, sds, cols) {
+  df[cols] = scale(df[cols], center = means, scale = sds)
+  df
+}
+data_train = standardize(data_train_raw, train_means, train_sds, continuous)
+data_test = standardize(data_test_raw, train_means, train_sds, continuous)
+# Now add categorical predictors
+data_train$AC = data_train_raw$AC
+data_train$Pool = data_train_raw$Pool
+data_train$Highway = data_train_raw$Highway
+data_train$Quality = factor(data_train_raw$Quality)
+
+data_test$AC = data_test_raw$AC
+data_test$Pool = data_test_raw$Pool
+data_test$Highway = data_test_raw$Highway
+data_test$Quality = factor(data_test_raw$Quality)
+
+
+cat("Standardized continuous predictors and split into training and test sets (80/20) before fitting models\n")
+c(training = nrow(data_train),test = nrow(data_test))
+```
+
+```{R}
+#| fig-width: 20
+#| fig-height: 15
+#| out-width: "100%"
+
+fit_slr = lm(log_price ~ Sqft, data = data_train)
+fit_slr_reg = lm(Price ~ Sqft, data = data_train)
+
+make_slr_diagnostics <- function(mod, model_title = "Simple Linear Regression Model") {
+  
+  # Extract model data
+  mf <- model.frame(mod)
+  
+  y_name <- names(mf)[1]
+  x_name <- names(mf)[2]
+  
+  n <- nobs(mod)
+  
+  # Raw residuals
+  resid_raw <- resid(mod)
+  
+  # MSE = SSE / degrees of freedom
+  MSE <- sum(resid_raw^2) / df.residual(mod)
+  
+  # Semistudentized residuals
+  ei <- resid_raw / sqrt(MSE)
+  
+  diag_df <- data.frame(
+    obs = seq_len(n),
+    x = mf[[x_name]],
+    y = mf[[y_name]],
+    yhat = fitted(mod),
+    ei = ei,
+    abs_ei = abs(ei)
+  )
+  
+  base_theme <- theme_minimal(base_size = 10) +
+    theme(
+      plot.title = element_text(size = 10, face = "bold"),
+      panel.grid.minor = element_blank(),
+      aspect.ratio = 1
+    )
+  
+  p1 <- ggplot(diag_df, aes(x = x, y = y)) +
+    geom_point() +
+    geom_smooth(method = "lm", se = FALSE, formula = y ~ x) +
+    labs(
+      title = "Data with fitted line",
+      x = x_name,
+      y = y_name
+    ) +
+    base_theme
+  
+  p2 <- ggplot(diag_df, aes(x = x, y = ei)) +
+    geom_hline(yintercept = 0, linetype = "dashed") +
+    geom_point() +
+    geom_smooth(method = "loess", se = TRUE, formula = y ~ x) +
+    labs(
+      title = expression(e[i]^"*" ~ "vs" ~ x[i]),
+      x = expression(x[i]),
+      y = expression(e[i]^"*")
+    ) +
+    base_theme
+  
+  p3 <- ggplot(diag_df, aes(x = yhat, y = ei)) +
+    geom_hline(yintercept = 0, linetype = "dashed") +
+    geom_point() +
+    geom_smooth(method = "loess", se = TRUE, formula = y ~ x) +
+    labs(
+      title = expression(e[i]^"*" ~ "vs" ~ hat(y)[i]),
+      x = expression(hat(y)[i]),
+      y = expression(e[i]^"*")
+    ) +
+    base_theme
+  
+  p4 <- ggplot(diag_df, aes(x = x, y = abs_ei)) +
+    geom_point() +
+    geom_smooth(method = "loess", se = TRUE, formula = y ~ x) +
+    labs(
+      title = expression("|" * e[i]^"*" * "|" ~ "vs" ~ x[i]),
+      x = expression(x[i]),
+      y = expression("|" * e[i]^"*" * "|")
+    ) +
+    base_theme
+  
+  p5 <- ggplot(diag_df, aes(x = ei)) +
+    geom_histogram(bins = 12, boundary = 0) +
+    labs(
+      title = expression("Histogram of" ~ e[i]^"*"),
+      x = expression(e[i]^"*"),
+      y = "Count"
+    ) +
+    base_theme
+  
+  p6 <- ggplot(diag_df, aes(sample = ei)) +
+    stat_qq() +
+    stat_qq_line() +
+    labs(
+      title = expression("Q-Q plot of" ~ e[i]^"*"),
+      x = "Theoretical quantiles",
+      y = expression(e[i]^"*")
+    ) +
+    base_theme
+  
+  # Compute ACF without base R plotting
+  acf_obj <- acf(ei, plot = FALSE)
+  
+  acf_df <- data.frame(
+    lag = as.numeric(acf_obj$lag),
+    acf = as.numeric(acf_obj$acf)
+  )
+  
+  acf_df_no0 <- subset(acf_df, lag > 0)
+  
+  acf_bound <- 1.96 / sqrt(n)
+  
+  p7 <- ggplot(acf_df_no0, aes(x = lag, y = acf)) +
+    geom_hline(yintercept = 0) +
+    geom_hline(yintercept = c(-acf_bound, acf_bound), linetype = "dashed") +
+    geom_segment(aes(xend = lag, yend = 0)) +
+    geom_point() +
+    labs(
+      title = expression("ACF of" ~ e[i]^"*"),
+      x = "Lag",
+      y = "ACF"
+    ) +
+    base_theme
+  
+  p8 <- ggplot(diag_df, aes(x = obs, y = ei)) +
+    geom_hline(yintercept = 0, linetype = "dashed") +
+    geom_line() +
+    geom_point() +
+    labs(
+      title = expression(e[i]^"*" ~ "vs observation order"),
+      x = "Observation order",
+      y = expression(e[i]^"*")
+    ) +
+    base_theme
+  
+design <- "
+ABC
+DEF
+GHH
+"
+
+p1 + p2 + p3 + p4 + p5 + p6 + p7 + p8 +
+  plot_layout(design = design) +
+  plot_annotation(
+    title = model_title,
+    subtitle = expression("Residuals are semistudentized: " * e[i]^"*" == e[i] / sqrt(MSE))
+  )
+}
+
+make_slr_diagnostics(fit_slr_reg, "Price vs Sqft")
+make_slr_diagnostics(fit_slr, "log_price vs Sqft")
+```
+
+- Note that since this is not a time series, the ACF plot does not provide information as useful as our other diagnostic plots \*
+
+Here I plotted diagnostic for two SLR models using Sqft as the predictor since it had the highest linear correlation with the response. First I plotted Price vs Sqft, then transformed to log_price vs Sqft. Looking at the first set of plots with the untransformed response there is a very clear story. Looking at the plot of Price vs Sqft we can see that the data is fairly linear, but it blows up as Sqft increases creating a clear funnel shape. Looking at the residual plots we see that the confidence interval encompasses the zero line very well, indicating that there is in fact a linear relationship here. However, the funnel shape in these plots is obvious and severe. This combined with the shape of the first plot indicate hetereoskedasticity. This is immediately confirmed in the absolute residual plot, which has a clear curve and funnel shape, confirming the suspiscion of non constant variance. The histogram of residuals looks very slightly right skewed, while the QQ plot has noticeable heavy tails. This is likely due to the non constant variance issue we already observed.
+
+Transforming the response to log_price does exactly what we expect. The log_price vs Sqft plot is extremely linear, and the blow up for larger values of Sqft is very minimal. Looking at the residual plots, the obvious funnel shape has disappeared, and while there is still some evidence of a diamond shape that would indicate heteroskedasticity it is not as extreme. This is confirmed in the absolute residual plot, which still has clear curves, but the absolute residuals are much more evenly scattered, and besides the dip for low values of Sqft, we can almost draw a horizontal line through the entire confidence band. The histogram is very symmetric, and the QQ-plot still shows heavy tails but they are less drastic than before the transformation. On account of the symmetric histogram, these tails are certainly caused by the non constant variance observed in the absolute residual plot. Going back to the residual plots, there is a very obvious U-shape that indicates a possible relationship with Sqft\^2 as a quadratic term. If I were to pursue this model further I would choose to fit it with weighted least squares in order to solve the non constant variance issue.
+
+Overall, the log transform mitigates the issue of heteroskedasticity significantly so I will select it as the response variable going forward and throw out Price.
+
+```{r}
+# Remove Price from data set
+data_train$Price = NULL
+data_test$Price = NULL
+continuous = continuous[-1]
+# Remove log_price since we only need predictors now
+continuous = continuous[-1]
+
+# Function for outlier diagnostics (used again later for MLR)
+make_outlier_diagnostics = function(mod, model_title = ""){
+  # Compute outlier diagnostics
+  diag_df <- data.frame(
+    obs      = 1:length(fitted(mod)),
+    leverage = hatvalues(mod),
+    cooks_d  = cooks.distance(mod),
+    ext_stud = rstudent(mod)
+  )
+  
+  n <- nobs(mod)
+  p <- length(coef(mod))
+  
+  leverage_cutoff <- 2 * p / n
+  cooks_cutoff    <- 4 / n
+  esr_cutoff      <- qt(1 - 0.05 / (2 * n), df = n - p - 1)
+  
+  # ESR plot 
+  p_esr <- ggplot(diag_df, aes(x = obs, y = ext_stud, label = obs)) +
+    geom_hline(yintercept = c(-esr_cutoff, esr_cutoff), lty = 2, color = "red") +
+    geom_point(alpha = 0.6) +
+    geom_text(vjust = -0.7, size = 3, check_overlap = TRUE) +
+    labs(
+      title = "Externally Studentized Residuals",
+      x = "Observation Index",
+      y = expression(t[i])
+    ) +
+    theme_minimal(base_size = 14)
+  
+  # Cook's Distance plot
+  p_cooks <- ggplot(diag_df, aes(x = obs, y = cooks_d, label = obs)) +
+    geom_segment(aes(xend = obs, y = 0, yend = cooks_d)) +
+    geom_point(alpha = 0.6) +
+    geom_hline(yintercept = cooks_cutoff, lty = 2, color = "red") +
+    geom_text(vjust = -0.7, size = 3, check_overlap = TRUE) +
+    labs(
+      title = "Cook's Distance",
+      x = "Observation Index",
+      y = expression(D[i])
+    ) +
+    theme_minimal(base_size = 14)
+  
+  # Leverage plot
+  p_leverage <- ggplot(diag_df, aes(x = obs, y = leverage, label = obs)) +
+    geom_segment(aes(xend = obs, y = 0, yend = leverage)) +
+    geom_point(alpha = 0.6) +
+    geom_hline(yintercept = leverage_cutoff, lty = 2, color = "red") +
+    geom_text(vjust = -0.7, size = 3, check_overlap = TRUE) +
+    labs(
+      title = "Leverage (Hat Values)",
+      x = "Observation Index",
+      y = expression(h[ii])
+    ) +
+    theme_minimal(base_size = 14)
+  
+  list(esr = p_esr, leverage = p_leverage, cooks = p_cooks, data = diag_df)
+}
+
+diag = make_outlier_diagnostics(fit_slr)
+diag$esr
+diag$leverage
+diag$cooks
+```
+
+Looking at out outlier diagnostics, we can first see that none of the observations have ESR outside of our expected range, which is a good sign. This trend does not continue for the leverage as we can see several values above the threshold, with 86 and 65 being the highest by far. Then when we see our Cook's distance plot, observations 86 and 106 have the most influence which makes sense considering the high leverage and the somewhat high ESR. The tables below show these things more quantitatively.
+
+```{r}
+
+esr_table <- diag$data[order(-abs(diag$data$ext_stud)), c("obs", "ext_stud")]
+knitr::kable(head(esr_table, 10), digits = 3, align = "c", row.names = FALSE)
+
+leverage_table <- diag$data[order(-diag$data$leverage), c("obs", "leverage")]
+knitr::kable(head(leverage_table, 10), digits = 3, align = "c", row.names = FALSE)
+
+cooks_table <- diag$data[order(-diag$data$cooks_d), c("obs", "cooks_d")]
+knitr::kable(head(cooks_table, 10), digits = 3, align = "c", row.names = FALSE)
+```
+
+```{r, message=FALSE}
+# Sensitivity analysis to see if it is worth removing the most influential point
+most_influential <- which.max(cooks.distance(fit_slr))
+fit_without <- update(fit_slr, subset = -most_influential)
+coefficient_comparison <- data.frame(
+coefficient = names(coef(fit_slr)),
+full_data = unname(coef(fit_slr)),
+without_observation = unname(coef(fit_without))
+)
+coefficient_comparison$change <-
+coefficient_comparison$without_observation -
+coefficient_comparison$full_data
+knitr::kable(coefficient_comparison, digits = 3, align = "c")
+```
+
+The highest influence observation was 86, so here I did a sensitivity analysis and removed it. After refitting the model without this point we can see that there is very minimal change in the model. The change is less than 1 percent so I don't think there is any reason to remove any of these points as they are not particularly influential. This confirms the earlier visual suspiscion.
+
+```{r}
+newdata = data.frame(Sqft = c(0.5, 1.5, 2))
+log_price_mean <- mean(log(data_raw$Price))   
+log_price_sd   <- sd(log(data_raw$Price))
+
+pred_log_scale <- predict(fit_slr, newdata = newdata, interval = "confidence")
+pred_log_raw <- pred_log_scale * log_price_sd + log_price_mean
+
+pred_log_scale <- predict(fit_slr, newdata = newdata, interval = "prediction")
+pred_log_raw2  <- pred_log_scale * log_price_sd + log_price_mean
+
+# 2. exponentiate to dollars
+pred_dollars_mean <- exp(pred_log_raw)
+pred_dollars_mean
+pred_dollars <- exp(pred_log_raw2)
+pred_dollars
+
+```
+
+Here are predicted sales prices at 0.5, 1.5, and 2 standard deviations above the mean of log_price using confidence and prediction intervals. The first 3 fit columns gives us the mean predicted price at each respective value above the mean. As we can see there is a positive correlation between increased sqft and the resulting price, which is exactly what we expect. The second three values show us a single predicted price so it makes sense that the intervals are much wider.
+
+```{r}
+cat("Full predictor pool: \n")
+predictor_train = dplyr::select(data_train, -log_price)
+names(predictor_train)
+```
+
+```{r}
+#| fig-width: 20
+#| fig-height: 15
+#| out-width: "100%"
+full_fit = lm(log_price ~ ., data=data_train)
+round(coef(summary(full_fit)), 3)
+round(car::vif(full_fit), 2)
+```
+
+Based on the results here we can analyze some things about this predictor pool. As far as significance of coefficients we can see that bed, bath, and highway (beyond again!!) are all insignificant while the rest of the predictors are significant. The highest VIF values are sqft, quality, and bath, but none of them are above 5 which is the stricter of the rules of thumb for VIF so multicollinearity doesn't seem like much of an issue here. All of the other predictors have very low VIF less than 2.
+
+```{r}
+
+```
+
+```{r}
+# Add all quadratic and interaction terms into the predictor pool
+data_train_full = data_train
+data_test_full = data_test
+data_train_full[paste0(continuous, "2")] = data_train[continuous]^2
+data_test_full[paste0(continuous, "2")] = data_test[continuous]^2
+
+interaction_vars = c(continuous, "AC", "Pool", "Highway", "Quality")
+train_interactions = model.matrix(~ (.)^2, data = data_train[interaction_vars])
+test_interactions = model.matrix(~ (.)^2, data = data_test[interaction_vars])
+
+keep = grepl(":", colnames(train_interactions))
+train_interactions = train_interactions[, keep, drop = FALSE]
+test_interactions = test_interactions[, keep, drop = FALSE]
+
+data_train_full = cbind(data_train_full, train_interactions)
+data_test_full = cbind(data_test_full, test_interactions)
+
+# Remove Quality predictor and replace with dummies
+dummies_train = model.matrix(~ Quality - 1, data = data_train_full)[, -1]
+data_train_full$Quality = NULL
+data_train_full = cbind(data_train_full, dummies_train)
+
+dummies_test = model.matrix(~ Quality - 1, data = data_test_full)[, -1]
+data_test_full$Quality = NULL
+data_test_full = cbind(data_test_full, dummies_test)
+
+cat("Original predictor pool size vs full predictor pool size: \n")
+c(original_preds = ncol(data_train) - 1, full_preds = ncol(data_train_full) - 1)
+
+```
+After adding all quadratic predictors and interaction terms this is the size of our predictor set. We can verify this result mathematically. Recall that there are 6 continuous predictors and 4 categorical predictors, 3 of which are binary and 1 which is a three level factor. The factor gets turned into 2 dummy variables, meaning that our original predictor pool is 11 predictors, 6 of which are continuous and 5 of which are binary. We square the 6 continuous predictors giving us a pool of 17. Finally, there are 11 choose 2 ways to make the interaction terms which comes out to 55 total terms. 11 original predictors plus 6 quadratic terms plus 55 total terms which gives us 72 total terms. However we have the interaction term between the two quality dummy variables which will always be zero, effectively giving us 71 terms in the full predictor pool.
+
+
+```{r, warning=FALSE, message=FALSE}
+# Run best subset selections via forward and backward selection, since p=72, 2^71 models is unfeasible to check
+expanded_full_fit = lm(log_price ~ ., data = data_train_full)
+null_fit = lm(log_price ~ 1, data = data_train_full)
+
+forward_fit = step(
+  null_fit, 
+  scope = list(lower = formula(null_fit), upper = formula(expanded_full_fit)), 
+  direction = "forward", k=log(nrow(data_train_full)), 
+  trace = 0
+)
+
+backward_fit = step(
+  expanded_full_fit,
+  direction = "backward",
+  k = log(nrow(data_train_full)),
+  trace = 0
+)
+
+# Method to order formula terms to identify model hierarchy easier
+order_formula_terms = function(fit){
+  terms_vec = attr(terms(fit), "term.labels")
+  is_interaction = grepl(":", terms_vec)
+  is_quadratic = grepl("2$", terms_vec) & 
+    !is_interaction & 
+    !terms_vec %in% c("Quality2", "Quality3")
+  is_base = !is_interaction & !is_quadratic
+  
+  ordered_terms = c(
+    sort(terms_vec[is_base]),
+    sort(terms_vec[is_quadratic]),
+    sort(terms_vec[is_interaction])
+  )
+  
+  response_name = all.vars(formula(fit))[1]
+  reformulate(ordered_terms, response = response_name)
+}
+
+cat("Forward selection candidate model: \n\n")
+print(formula(order_formula_terms(forward_fit)), showEnv = FALSE)
+cat("\nBackward selection candidate model: \n\n")
+print(formula(order_formula_terms(backward_fit)), showEnv = FALSE)
+
+```
+Here we have the formulas for the two candidate models, the forward selection model and backward selection model. Before any analysis we must consider the model fitting hierarchy. In the forward selection model, we have bath^2 and bed^2 so we would add the corresponding main effect terms. From the interaction terms we would only have to add AC as a main effect term. The model originally contained 15 predictors and adding these 3 gives us a model with 18 predictors (p = 19). For the backward selection model, from the quadratic terms we would have to add the main effect of bath. From the interaction terms we add quality2, quality3, and sqft. The original model had 14 terms and we added 4 more giving us 18 predictors once again (p = 19). In general, backward selection will produce a larger model but in this case the original model was actually smaller than forward selection, and the two models ended up being the same size, which is interesting to note. The structure of these formulas makes some sense intuitively. Since the backward selection process starts with all predictors present, it can freely drop main effects in favor of interaction terms, while the forward selection process has to build the model up from the main effects. This is why we see more main effects in the original formula of the forward model, and the backward model contains mostly interaction terms. This is what the final two candidate models look like after adding the necessary main effects. Additionally I have chosen to remove AC:Quality3 from the plot.
+
+```{r}
+# Checking for a specific issue with interaction terms
+num_valid = sum(data_train_full$Pool > 0.5 & data_train_full$AC < 0.5)
+cat("Number of residencies with a pool but no AC: ", num_valid)
+idx = which(data_train_full$Pool > 0.5 & data_train_full$AC < 0.5)
+cat("\nObservation where singularity occurs: ", idx)
+lev = hatvalues(forward_fit)[8]
+cat("\nLeverage at this observation: ", lev)
+```
+Before we move onto diagnostics, we need to examine a few of these interaction terms. The first term we want to look at is AC:Pool. As we can see from the output above there is only one observation such that AC = 0 and Pool = 1. This creates a singularity in the data, which means that this observation will have a leverage of 1 (confirmed above). Leverage of 1 will give us a PRESS value and a Cook's distance of INF at this particular observation, which will make our model difficult to diagnose properly. Because of this we will remove it from the predictor set of both candidate models.
+
+
+```{r}
+# Add necessary main effects to each model
+forward_fit = update(forward_fit, . ~ . + Bath + Bed + AC - `AC:Pool`)
+backward_fit = update(backward_fit, . ~ . + Bath + Quality2 + Quality3 + Sqft - `AC:Pool`)
+cat("Forward selection candidate model: \n\n")
+print(formula(order_formula_terms(forward_fit)), showEnv = FALSE)
+cat("\nBackward selection candidate model: \n\n")
+print(formula(order_formula_terms(backward_fit)), showEnv = FALSE)
+```
+```{r}
+alias(backward_fit)
+```
+The above output shows us that with the current equation for this model creates a design matrix that is not full rank. As we can see we can write Quality3 as Quality3 = Intercept - AC + AC:Quality2 + AC:Quality3 - Quality2, and this function is completely deterministic, so our design matrix columns are linearly independent. This creates a data leak in our model that will cause issues in fitting coefficient values and other diagnostics. Because of this I decided to remove one of the predictors in this dependency. I am going to remove AC:Quality3 because it is the least varied; most of the time when Quality3 is 1, AC is 0. The equations below are the final model equations from the full predictor set that I will be diagnosing.
+```{r}
+backward_fit = update(backward_fit, . ~ . - `AC:Quality3`)
+cat("Forward selection candidate model: \n\n")
+print(formula(order_formula_terms(forward_fit)), showEnv = FALSE)
+cat("\nBackward selection candidate model: \n\n")
+print(formula(order_formula_terms(backward_fit)), showEnv = FALSE)
+```
+
+
+```{r}
+# Define functions to compute PRESS statistics
+
+PRESS <- function(fit) {
+  sum((residuals(fit) / (1 - hatvalues(fit)))^2)
+}
+
+PRESS_RMSE <- function(fit) {
+  sqrt(PRESS(fit) / nobs(fit))
+}
+
+RMSE <- function(fit, test_data) {
+  prediction <- predict(fit, newdata = test_data)
+  sqrt(mean((data_test_full$log_price - prediction)^2))
+}
+```
+
+```{r}
+models = list(
+  "Full Main Effects Model" = full_fit,
+  "Forward Selection" = forward_fit,
+  "Backward Selection" = backward_fit
+)
+
+test_sets = list(
+  data_test,
+  data_test_full,
+  data_test_full
+)
+
+model_comparison = data.frame(
+  Model = names(models),
+  Predictors = sapply(models, function(fit) length(coef(fit)) - 1),
+  Adj_R2 = sapply(models, function(fit) summary(fit)$adj.r.squared),
+  BIC = sapply(models, BIC),
+  AIC = sapply(models, AIC),
+  PRESS_RMSE = sapply(models, PRESS_RMSE),
+  Test_RMSE = mapply(
+    RMSE,
+    models,
+    test_sets
+  )
+)
+
+
+knitr::kable(
+  model_comparison,
+  digits = 4,
+  row.names = FALSE,
+  align = "c"
+)
+```
+
+Here is a comparison of the forward selection, backward selection, and a model with only our main effects. As we can see, the main effects model performs worse than the other two on all metrics. It performs worse on adjusted R^2 by a modest 4 percent, but then is significantly worse on AIC and BIC by around 20 percent and 10 percent respectively. The main effects model also performs worse on PRESS RMSE by about 7 percent. This aligns with our SLR diagnostics, which showed that a model with only linear main effects was likely insufficient to capture relationships. From this point on we will throw out the main effects model and diagnose the forward and backward selections. One thing to note at this point is that the forward and backward selection were done with BIC penalty. This choice was made to stay true to the research question. BIC penalty generally promotes a smaller model as it penalizes complexity more than AIC, giving us a smaller and more interpretable model. In this case it is important that we get a good understanding of what predictors have an impact on sales price so interpretability is very important.
+
+```{r}
+#| fig-width: 20
+#| fig-height: 15
+#| out-width: "100%"
+
+# This function is analogous to the SLR diagnostics it just removes the first two plots
+
+make_mlr_diagnostics <- function(mod, model_title = "Multiple Linear Regression Model") {
+  
+  mf <- model.frame(mod)
+  y_name <- names(mf)[1]
+  n <- nobs(mod)
+  
+  resid_raw <- resid(mod)
+  MSE <- sum(resid_raw^2) / df.residual(mod)
+  ei <- resid_raw / sqrt(MSE)
+  
+  diag_df <- data.frame(
+    obs = seq_len(n),
+    yhat = fitted(mod),
+    ei = ei,
+    abs_ei = abs(ei)
+  )
+  
+  base_theme <- theme_minimal(base_size = 10) +
+    theme(
+      plot.title = element_text(size = 10, face = "bold"),
+      panel.grid.minor = element_blank(),
+      aspect.ratio = 1
+    )
+  
+  p3 <- ggplot(diag_df, aes(x = yhat, y = ei)) +
+    geom_hline(yintercept = 0, linetype = "dashed") +
+    geom_point() +
+    geom_smooth(method = "loess", se = TRUE, formula = y ~ x) +
+    labs(title = expression(e[i]^"*" ~ "vs" ~ hat(y)[i]), x = expression(hat(y)[i]), y = expression(e[i]^"*")) +
+    base_theme
+  
+  p4 <- ggplot(diag_df, aes(x = yhat, y = abs_ei)) +
+    geom_point() +
+    geom_smooth(method = "loess", se = TRUE, formula = y ~ x) +
+    labs(title = expression("|" * e[i]^"*" * "|" ~ "vs" ~ hat(y)[i]), x = expression(hat(y)[i]), y = expression("|" * e[i]^"*" * "|")) +
+    base_theme
+  
+  p5 <- ggplot(diag_df, aes(x = ei)) +
+    geom_histogram(bins = 12, boundary = 0) +
+    labs(title = expression("Histogram of" ~ e[i]^"*"), x = expression(e[i]^"*"), y = "Count") +
+    base_theme
+  
+  p6 <- ggplot(diag_df, aes(sample = ei)) +
+    stat_qq() + stat_qq_line() +
+    labs(title = expression("Q-Q plot of" ~ e[i]^"*"), x = "Theoretical quantiles", y = expression(e[i]^"*")) +
+    base_theme
+  
+  acf_obj <- acf(ei, plot = FALSE)
+  acf_df <- data.frame(lag = as.numeric(acf_obj$lag), acf = as.numeric(acf_obj$acf))
+  acf_df_no0 <- subset(acf_df, lag > 0)
+  acf_bound <- 1.96 / sqrt(n)
+  
+  p7 <- ggplot(acf_df_no0, aes(x = lag, y = acf)) +
+    geom_hline(yintercept = 0) +
+    geom_hline(yintercept = c(-acf_bound, acf_bound), linetype = "dashed") +
+    geom_segment(aes(xend = lag, yend = 0)) +
+    geom_point() +
+    labs(title = expression("ACF of" ~ e[i]^"*"), x = "Lag", y = "ACF") +
+    base_theme
+  
+  p8 <- ggplot(diag_df, aes(x = obs, y = ei)) +
+    geom_hline(yintercept = 0, linetype = "dashed") +
+    geom_line() + geom_point() +
+    labs(title = expression(e[i]^"*" ~ "vs observation order"), x = "Observation order", y = expression(e[i]^"*")) +
+    base_theme
+  
+  design <- "
+  AB
+  CD
+  EF
+  "
+  
+  p3 + p4 + p5 + p6 + p7 + p8 +
+    plot_layout(design = design) +
+    plot_annotation(
+      title = model_title,
+      subtitle = expression("Residuals are semistudentized: " * e[i]^"*" == e[i] / sqrt(MSE))
+    )
+}
+
+make_mlr_diagnostics(forward_fit, "Forward Selection")
+make_mlr_diagnostics(backward_fit, "Backward Selection")
+```
+
+Here we have diagnostic plots for the two MLR models. I have chosen to eliminate the response vs predictor and residual vs predictor plots that were present for SLR diagnostics because we have many predictors here not just one. Also the residual vs response plot provides very similar information to those two plots.
+
+First, looking at the residual vs log_price plot in both models, we can see that the confidence band very nicely follows the zero line with very little curve, indicating that both models are capturing a linear relationship. Now moving on to the absolute residual plot, the shape is similar for both candidates. There is a moderate curve for small fitted values and then the LOESS curve flattens out. In both models we would be unable to draw a horizontal line through the gray band, indicating that there is a small issue of non constant variance in both of these models. Looking at the histogram, in both models it is very much symmetric which is good. Finally for the QQ-plot we have very slightly heavy tails in both cases, but this is probably due to the heteroskedasticity we noticed earlier considering how symmetric the histograms are. Both models exhibit slight non constant variance, but perform very well in terms of linearity, normality, and non correlated errors. Visually there does not seem to be any particularly influential points but we will check that next.
+
+As of right now heteroskedasticity seems to be the only issue, and to remedy that I would implement weighted least squares.
+
+```{r}
+#| fig-width: 20
+#| fig-height: 15
+#| out-width: "100%"
+
+# Influential point diagnostics
+
+forward_diag = make_outlier_diagnostics(forward_fit, "(Forward Selection")
+backward_diag = make_outlier_diagnostics(backward_fit, "(Backward Selection")
+
+forward_diag$esr / forward_diag$leverage / forward_diag$cooks
+backward_diag$esr / backward_diag$leverage / backward_diag$cooks
+```
+
+Both plots have the exact same result when we look for potentially influential points. There are no observations that have ESR outside of our expected boundary, but there are a few with high leverage, namely observation 98. As far as influential points, 8 has by far the highest Cook's distance, followed by 45 so these are the two most influential points. I should note that observation 8 is the point we flagged earlier as the only point that has AC = 0  and Pool = 1, so it is no surprise that it has been marked as influential.
+
+```{r}
+# Sensitivity analysis for forward selection
+most_influential <- which.max(cooks.distance(forward_fit))
+fit_without <- update(forward_fit, subset = -most_influential)
+coefficient_comparison <- data.frame(
+coefficient = names(coef(forward_fit)),
+full_data = unname(coef(forward_fit)),
+without_observation = unname(coef(fit_without))
+)
+coefficient_comparison$change <- coefficient_comparison$without_observation - coefficient_comparison$full_data
+
+knitr::kable(coefficient_comparison, digits = 3, align = "c")
+# Sensitivity analysis for backward selection
+most_influential <- which.max(cooks.distance(backward_fit))
+fit_without <- update(backward_fit, subset = -most_influential)
+coefficient_comparison <- data.frame(
+coefficient = names(coef(backward_fit)),
+full_data = unname(coef(backward_fit)),
+without_observation = unname(coef(fit_without))
+)
+
+coefficient_comparison$change <- coefficient_comparison$without_observation - coefficient_comparison$full_data
+
+knitr::kable(coefficient_comparison, digits = 3, align = "c")
+
+num_bath = data_train_raw[most_influential, "Bath"]
+cat("Number of bathrooms at most influential point: ", num_bath)
+```
+
+This is a sensitivity analysis after removing the most influential point. As we can see for the most part the changes are moderate, but there is one specific one to flag. The coefficient of Bath changed signs, which is definitely something to analyze further. As we see above the number of bathrooms at the most influential observation is 5. There are only 19 observations in this data set with that many bathrooms, which is a small percent, so getting rid of one of those observations is likely to create a significant sway in that coefficient. At this point we have had several issues with this specific observation so it would be wise to check if this is a data entry error, but I have no way to do this. Despite the coefficient sign change we noticed, looking back at the diagnostic plots we don't seem to be having any major issue with this outlier, so we will just keep it.
+
+```{r}
+summary(forward_fit)
+summary(backward_fit)
+```
+Here are both of the model summaries and we will analyze these for evidence of multicollinearity. In the foward selection model, 11 out of 17 of our predictors have significant t-tests and the F-test is significant with a large F statistic which is a good sign. Additionally none of the standard errors are alarming for any coefficient. The fact that we have several predictors with an insignificant t-value could be a sign of multicollinearity. The backward selection model is much better with 14 out of 16 predictors being significant. The F-test is again significant and the F statistic is higher in this case. The standard errors are once again very reasonable, so there are no indicators of multicollinearity in this model.
+
+```{r}
+car::vif(forward_fit)
+car::vif(backward_fit)
+```
+Looking at the VIFs there is clearly multicollinearity in both models. There are several predictors Sqft, Year, Quality2, and Quality3 have large VIFs across both models as well as several of their interaction terms. This is not particularly surprising, as we would expect correlation between terms and their interactions so this is an expected consequence of fitting the more complex model structure. The highest VIF is Quality2 in the backward selection model, which is also expected. Earlier we discussed how Quality2 is very stronglt related with several other predictors in the pool, so it comes at no surprise it has a high VIF. Given the expected and structural nature of these high VIF quantities, I am going to choose to do weighted least squares to address non constant variance. While ridge regression would help with the correlation that is present in this model, I think I would get less of a benefit from doing this since multicollinearity is a structural tradeoff that I am accepting by fitting a model with many quadratic and interaction terms.
+
+```{r}
+# Get fitted values and absolute residuals from OLS model
+data_train_full <- data_train_full |>
+  mutate(
+    fitted_ols_fwd = fitted(forward_fit),
+    abs_residual_ols_fwd = abs(residuals(forward_fit))
+  )
+
+# Model how residual magnitude varies
+scale_fit_fwd <- loess(
+  abs_residual_ols_fwd ~ fitted_ols_fwd,
+  data = data_train_full
+)
+
+# Convert to weights
+data_train_full <- data_train_full |>
+  mutate(
+    estimated_sd_fwd = pmax(predict(scale_fit_fwd), 0.001),  # floor to avoid divide-by-zero/negative
+    wls_weight_fwd = 1 / estimated_sd_fwd^2
+  )
+
+# Refit using the new weights
+forward_fit_wls = lm(
+  formula(forward_fit),
+  data = data_train_full,
+  weights = wls_weight_fwd
+)
+
+# Get fitted values and absolute residuals from OLS model
+data_train_full <- data_train_full |>
+  mutate(
+    fitted_ols_back = fitted(backward_fit),
+    abs_residual_ols_back = abs(residuals(backward_fit))
+  )
+
+# Model how residual magnitude varies
+scale_fit_back <- loess(
+  abs_residual_ols_back ~ fitted_ols_back,
+  data = data_train_full
+)
+
+# Convert to weights
+data_train_full <- data_train_full |>
+  mutate(
+    estimated_sd_back = pmax(predict(scale_fit_back), 0.001),  # floor to avoid divide-by-zero/negative
+    wls_weight_back = 1 / estimated_sd_back^2
+  )
+
+# Refit using the new weights
+backward_fit_wls = lm(
+  formula(backward_fit),
+  data = data_train_full,
+  weights = wls_weight_back
+)
+
+```
+
+```{r}
+# Compare the models
+ols_table_fwd <- as.data.frame(coef(summary(forward_fit)))
+ols_table_fwd$term <- rownames(ols_table_fwd)
+ols_table_fwd$method <- "OLS"
+
+wls_table_fwd <- as.data.frame(coef(summary(forward_fit_wls)))
+wls_table_fwd$term <- rownames(wls_table_fwd)
+wls_table_fwd$method <- "WLS"
+
+coefficient_comparison_fwd <- bind_rows(
+  ols_table_fwd,
+  wls_table_fwd
+) |>
+  select(
+    method,
+    term,
+    Estimate,
+    `Std. Error`,
+    `t value`,
+    `Pr(>|t|)`
+  )
+
+knitr::kable(
+  coefficient_comparison_fwd,
+  digits = 4,
+  row.names = FALSE,
+  align = "c",
+  caption = "Forward Selection: OLS vs WLS"
+)
+
+ols_table_back <- as.data.frame(coef(summary(backward_fit)))
+ols_table_back$term <- rownames(ols_table_back)
+ols_table_back$method <- "OLS"
+
+wls_table_back <- as.data.frame(coef(summary(backward_fit_wls)))
+wls_table_back$term <- rownames(wls_table_back)
+wls_table_back$method <- "WLS"
+
+coefficient_comparison_back <- bind_rows(
+  ols_table_back,
+  wls_table_back
+) |>
+  select(
+    method,
+    term,
+    Estimate,
+    `Std. Error`,
+    `t value`,
+    `Pr(>|t|)`
+  )
+
+knitr::kable(
+  coefficient_comparison_back,
+  digits = 4,
+  row.names = FALSE,
+  align = "c",
+  caption = "Backward Selection: OLS vs WLS"
+)
+```
+
+For both forward and backwards, the coefficients are stable from OLS to WLS, showing very minimal change across the board, but there are a few things to point out here. 
+In the forward model, none of the coefficients flip, while in the backward model Sqft goes from barely significant to insignificant and Year:Quality3 goes from insignificant to significant. The standard errors change in a nonuniform way, which is exactly what we expect from WLS. The new weights are determined by the spread of each observation, so the change will be variable. The fact that Sqft is not significant in the backward model is interesting because we picked it out as our most correlated predictor in our original diagnostics.this could be because it is strongly correlated with other terms, so the interactions explain away what it could have explained on its own.
+
+```{r}
+# Check diagnostics with new weights
+make_mlr_diagnostics_wls <- function(mod, model_title = "") {
+  resid_raw <- weighted.residuals(mod)
+  MSE <- sum(resid_raw^2) / df.residual(mod)
+  ei <- resid_raw / sqrt(MSE)
+  
+  diag_df <- data.frame(yhat = fitted(mod), ei = ei, abs_ei = abs(ei))
+  
+  ggplot(diag_df, aes(x = yhat, y = abs_ei)) +
+    geom_point() +
+    geom_smooth(method = "loess", se = TRUE) +
+    labs(title = paste("Weighted |Residuals| vs Fitted -", model_title))
+}
+
+make_mlr_diagnostics_wls(forward_fit_wls, "Forward Selection WLS Model")
+make_mlr_diagnostics_wls(backward_fit_wls, "Backward Selection WLS Model")
+```
+
+After the getting the least squares weights we can see that we now have beautiful constant variance across all of the data which is the exact fix that we wanted from this remedial measure.
+
+```{r}
+# Final model testing
+
+# PRESS_RMSE, AdjR2, AIC, BIC
+
+
+models <- list(
+  "Forward (OLS)"  = forward_fit,
+  "Forward (WLS)"  = forward_fit_wls,
+  "Backward (OLS)" = backward_fit,
+  "Backward (WLS)" = backward_fit_wls
+)
+
+in_sample <- data.frame(
+  Model = names(models),
+  Predictors = sapply(models, function(f) length(coef(f)) - 1),
+  Adj_R2 = sapply(models, function(f) summary(f)$adj.r.squared),
+  AIC = sapply(models, AIC),
+  BIC = sapply(models, BIC),
+  PRESS_RMSE = sapply(models, function(f) tryCatch(PRESS_RMSE(f), error = function(e) NA))
+)
+
+# Test set RMSE
+
+RMSE_test <- function(fit, test_data) {
+  pred <- predict(fit, newdata = test_data)
+  sqrt(mean((test_data$log_price - pred)^2))
+}
+
+in_sample$Test_RMSE <- c(
+  RMSE_test(forward_fit, data_test_full),
+  RMSE_test(forward_fit_wls, data_test_full),
+  RMSE_test(backward_fit, data_test_full),
+  RMSE_test(backward_fit_wls, data_test_full)
+)
+
+knitr::kable(in_sample, digits = 4, row.names = FALSE, align = "c",
+             caption = "In-sample and out-of-sample model comparison")
+
+# Cross validation on OLS models only
+
+manual_cv <- function(model_formula, data, k = 10, seed = 42) {
+  set.seed(seed)
+  n <- nrow(data)
+  folds <- sample(rep(1:k, length.out = n))
+  
+  fold_rmse <- numeric(k)
+  fold_mae <- numeric(k)
+  
+  for (i in 1:k) {
+    train_idx <- which(folds != i)
+    test_idx  <- which(folds == i)
+    
+    fit_i <- lm(model_formula, data = data[train_idx, ])
+    pred_i <- predict(fit_i, newdata = data[test_idx, ])
+    actual_i <- data[[all.vars(model_formula)[1]]][test_idx]
+    
+    fold_rmse[i] <- sqrt(mean((actual_i - pred_i)^2))
+    fold_mae[i]  <- mean(abs(actual_i - pred_i))
+  }
+  
+  data.frame(
+    CV_RMSE = mean(fold_rmse),
+    CV_RMSE_SD = sd(fold_rmse),
+    CV_MAE = mean(fold_mae)
+  )
+}
+
+cv_forward  <- manual_cv(formula(forward_fit), data_train_full)
+cv_backward <- manual_cv(formula(backward_fit), data_train_full)
+
+cv_results <- data.frame(
+  Model = c("Forward (OLS)", "Backward (OLS)"),
+  rbind(cv_forward, cv_backward)
+)
+
+knitr::kable(cv_results, digits = 4, row.names = FALSE, align = "c",
+             caption = "10-fold cross-validation (training data)")
+```
+
+As you can see all four of our final models are very similar on this test data. However, I am going to pick the forward WLS model as the best overall. First of all since it is a WLS model it does not violate the heteroskedasticity assumption and this model had the lowest test RMSE overall. Between all four models the adjusted R^2 are very similar with negligible difference. Looking at BIC and AIC, the forward WLS model has the lowest AIC and second lowest BIC, but the difference is again very small. For PRESS RMSE the story is the same this model has the second lowest but the difference to the lowest is insignificant. 
+
+Cross validation was only done on the OLS models because the WLS models used the full training set to develop weights, so trying to do cross validation would have some data leakage and get faulty results. As we can see the backward model had better results but the difference is once again very small, so even though backward is better here I will still take the forward WLS model overall. As far as interpretability, the models only differ by one predictor, so we don't really lose much interpretation between the two models, and as such I am still confident in selection the larger model.
+
+```{r}
+summary(forward_fit_wls)
+```
+$$
+\begin{aligned}
+\log(\text{Price}_i)=\;&
+\beta_0
++\beta_1\text{Sqft}_i
++\beta_2\text{Year}_i
++\beta_3\text{Lot}_i
++\beta_4(\text{Sqft}\times\text{Bed})_i \\
+&+\beta_5(\text{Year}\times\text{Quality}_2)_i
++\beta_6\text{Year}_i^2
++\beta_7\text{Pool}_i
++\beta_8\text{Bed}_i^2 \\
+&+\beta_9\text{Quality}_{2,i}
++\beta_{10}\text{Quality}_{3,i}
++\beta_{11}(\text{Bath}\times\text{Quality}_2)_i \\
+&+\beta_{12}\text{Bath}_i^2
++\beta_{13}(\text{Year}\times\text{AC})_i
++\beta_{14}(\text{Sqft}\times\text{Quality}_2)_i \\
+&+\beta_{15}\text{Bath}_i
++\beta_{16}\text{Bed}_i
++\beta_{17}\text{AC}_i
++\varepsilon_i.
+\end{aligned}
+$$
+Above is the final model selection which is a forward selection model that we then used weighted least squares on to fix issues with heteroskedasticity. This model contains 17 predictors including quadratic and interaction terms. The fitted model indicates that a residences sale price is influenced by a nontrivial combination of characteristics such as what features are present in the residence as well as basic statistics. The inclusion of quadratic terms for Year, Bed, and Bath indicates that the relationships between these characteristics and the price is not purely linear. The presence of several interaction terms also indicates that the effect of one predictor may depend on the value of another. For example in the Sqft and Bed interaction, the coefficient is negative. This indicates that the increase in sales price die to square footage actually decreases as the number of bedrooms increases. The fact that we have significant coefficients for Sqft:Quality2, Year:Quality2, and Bath:Quality2 indicates that the increase in sale price based on these predictors does differ across different levels of residence quality. Overall this indicates that in many cases the structural characteristics of the residence cannot be interpreted independently of home quality. 
+
+The final model has an R^2 value of 0.8624, indicating that roughly 86 percent of the variability in the log of price is due to the selected characteristics in the model. This model also achieved a test RMSE of 0.3946 which was almost identical to the cross-validation error that was observed using the OLS version of this model. This is an indicator that our model is generalizing very well and is not over fitting the data that it was trained on. 
+
+There are two main issues with this model. One was the observed multicollinearity in the fit of the OLS model, which would still be present in the WLS model. We observed high VIF values above 10 for several of the predictors. This was expected considering the amount of interaction and quadratic terms in the model, as those would naturally be correlated with their corresponding main effects. However this is still an issue, and in the future I would considering adding a ridge penalty to mitigate this issue. The second issue is that this model is complex and not trivial to interpret. While the coefficients individually tell a clear story, there are 17 of them, so it is difficult to understand the full picture. Another thing to test in the future would be comparative analysis of this model against less complex models to see if there is a fit that is more interpretable with similar predictive power and stability.
+
+As far as the research question, it is clear that a combination of structural features and selected interactions between them provide an accurate prediction of residential sale price. There is no single characteristic that clear determines the value, and we have to investigate each coefficient to understand how the interactions between the most important characteristics determine what the residence will eventually be sold for. Overall we can see that the most important predictors are Sqft, Year, Lot, Bed, Pool, Bath, AC, and Quality. These predictors provide accurate insight into what the home will be worth when we consider them in isolation as well as selected interactions between each other.
+
+
